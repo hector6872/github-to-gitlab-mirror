@@ -1,0 +1,18 @@
+[Unit]
+Description=Run GitHub to GitLab mirror daily at 03:00
+
+[Timer]
+# Every day at 03:00 system local time
+OnCalendar=*-*-* 03:00:00
+
+# Spread execution over up to 30 minutes at random to avoid colliding schedules
+RandomizedDelaySec=30m
+
+# If machine was offline or suspended at 03:00, execute on boot/wakeup
+Persistent=true
+
+AccuracySec=1min
+Unit=github-mirror.service
+
+[Install]
+WantedBy=timers.target
