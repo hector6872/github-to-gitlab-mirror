@@ -485,6 +485,10 @@ mirror_repo() {
     git -C "$dir" remote set-url gitlab "$GL_URL" 2>/dev/null || git -C "$dir" remote add gitlab "$GL_URL"
   fi
 
+  # Clean up any tracking refs that trigger GitLab "deny updating a hidden ref"
+  rm -rf "$dir/refs/remotes"
+  git -C "$dir" config --unset-all remote.gitlab.fetch 2>/dev/null || true
+
   local before after remote_refs changed=0
   before="$(refs_snapshot "$dir")"
 
@@ -500,36 +504,37 @@ mirror_repo() {
   remote_refs="$(git -C "$dir" ls-remote --heads --tags gitlab 2>/dev/null \
     | grep -v '\^{}' | awk '{print $1" "$2}' | sort || true)"
 
-  if [ "$first" = 1 ] || [ "$changed" = 1 ] || [ "$remote_refs" != "$after" ] || [ "$PUSH_ALWAYS" = "true" ]; then
-    local push_err
-    if ! push_err="$(git -C "$dir" push --mirror --quiet -o project.visibility=private gitlab 2>&1)" \
-      && ! push_err="$(git -C "$dir" push --mirror --quiet gitlab 2>&1)"; then
-      if echo "$push_err" | grep -qi "read-only repository\|archived"; then
-        log "  · $slug — skipped (repository is archived/read-only on GitLab)"
-        SKIPPED+=("$slug")
-        return 0
-      fi
-      log "  ✗ $slug — 'git push' to GitLab failed"
-      [ -n "$push_err" ] && log "    $push_err"
-      FAILED+=("$slug (push)")
-      return 1
-    fi
-    if [ "$first" = 1 ]; then
-      log "  + $slug — mirror created"
-      UPDATED+=("$slug")
-    elif [ "$changed" = 1 ]; then
-      log "  ↑ $slug — updated"
-      UPDATED+=("$slug")
-    elif [ "$remote_refs" != "$after" ]; then
-      log "  = $slug — repaired (remote was out of sync)"
-      REPAIRED+=("$slug")
-    else
-      log "  · $slug — unchanged"
-      SKIPPED+=("$slug")
-    fi
-  else
+  # If remote is already in sync with local refs, skip pushing
+  if [ -n "$remote_refs" ] && [ "$remote_refs" = "$after" ]; then
     log "  · $slug — unchanged"
     SKIPPED+=("$slug")
+    return 0
+  fi
+
+  local push_refspecs=('+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*')
+  local push_err
+  if ! push_err="$(git -C "$dir" push --prune --force --quiet -o project.visibility=private gitlab "${push_refspecs[@]}" 2>&1)" \
+    && ! push_err="$(git -C "$dir" push --prune --force --quiet gitlab "${push_refspecs[@]}" 2>&1)"; then
+    if echo "$push_err" | grep -qi "read-only repository\|archived"; then
+      log "  · $slug — skipped (repository is archived/read-only on GitLab)"
+      SKIPPED+=("$slug")
+      return 0
+    fi
+    log "  ✗ $slug — 'git push' to GitLab failed"
+    [ -n "$push_err" ] && log "    $push_err"
+    FAILED+=("$slug (push)")
+    return 1
+  fi
+
+  if [ -z "$remote_refs" ]; then
+    log "  + $slug — mirror created"
+    UPDATED+=("$slug")
+  elif [ "$changed" = 1 ]; then
+    log "  ↑ $slug — updated"
+    UPDATED+=("$slug")
+  else
+    log "  = $slug — repaired (remote was out of sync)"
+    REPAIRED+=("$slug")
   fi
   return 0
 }
