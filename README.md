@@ -55,9 +55,7 @@ Navigate to: **GitHub → Settings → Developer settings → Personal access to
 Navigate to: **GitLab → Preferences / User Settings → Access Tokens**.
 
 - Name: `github-mirror`
-- Scopes: **`api`** (grants permissions to query APIs, create projects, and push commits/tags).
-
-> **Note on GitLab Groups**: If mirroring into a group namespace (`GITLAB_GROUP`), your user/token must have permissions to create projects in that group (Developer role or higher).
+- Scopes: **`write_repository`** (grants permissions to push code and create projects via push-to-create; no API access required). All mirrored repositories are created as **private**.
 
 ---
 
@@ -123,12 +121,10 @@ Mirrored repositories are stored in `./data/repos/` by default. Logging streams 
 | `GITHUB_INCLUDE_FORKS` | Mirror forked repositories (`true` / `false`) | `false` |
 | `GITHUB_INCLUDE_ARCHIVED` | Mirror archived repositories (`true` / `false`) | `false` |
 | `GITHUB_EXCLUDE` | Space-separated patterns or globs to skip | `""` |
-| `GITLAB_USER` | GitLab username | Auto-detected from `GITLAB_TOKEN` |
-| `GITLAB_TOKEN` | GitLab access token | *(Required)* |
+| `GITLAB_USER` | GitLab username | Defaults to `GITHUB_USER` if omitted |
+| `GITLAB_TOKEN` | GitLab access token (`write_repository` scope) | *(Required)* |
 | `GITLAB_HOST` | GitLab instance URL | `https://gitlab.com` |
 | `GITLAB_GROUP` | Target group/subgroup path | `""` (personal namespace) |
-| `GITLAB_VISIBILITY` | Visibility for created repos (`private`, `internal`, `public`) | `private` |
-| `GITLAB_AUTO_CREATE` | Auto-create repository on GitLab if missing | `true` |
 | `MIRROR_DIR` | Directory to store bare git clones | `./data/repos` |
 | `LOG_DIR` | Directory to store log files (empty = disabled, stdout only) | `""` (disabled) |
 | `GIT_PROTOCOL` | Git transport (`https` or `ssh`) | `https` |

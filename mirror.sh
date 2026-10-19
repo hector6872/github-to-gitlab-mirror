@@ -131,8 +131,6 @@ GITLAB_USER="${GITLAB_USER:-}"
 GITLAB_TOKEN="${GITLAB_TOKEN:-}"
 GITLAB_HOST="${GITLAB_HOST:-https://gitlab.com}"
 GITLAB_GROUP="${GITLAB_GROUP:-}"
-GITLAB_VISIBILITY="${GITLAB_VISIBILITY:-private}"
-GITLAB_AUTO_CREATE="${GITLAB_AUTO_CREATE:-true}"
 GITLAB_SSH_HOST="${GITLAB_SSH_HOST:-gitlab.com}"
 
 MIRROR_DIR="${MIRROR_DIR:-$BASE_DIR/data/repos}"
@@ -178,7 +176,7 @@ command -v jq >/dev/null 2>&1 || die "jq is not installed (please install jq)"
 [ -n "$GITLAB_TOKEN" ] || die "GITLAB_TOKEN is required (set in .env or environment)"
 
 # ---------------------------------------------------------------------------
-# API Helpers
+# GitHub API (Repository Discovery)
 # ---------------------------------------------------------------------------
 gh_get() {
   curl -fsS \
@@ -188,36 +186,14 @@ gh_get() {
     "$1"
 }
 
-urlencode() { jq -rn --arg s "$1" '$s | @uri'; }
-
-gitlab_api() {
-  local method="$1" path="$2" data="${3:-}"
-  if [ -n "$data" ]; then
-    curl -fsS -X "$method" \
-      -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d "$data" "${GITLAB_HOST}/api/v4${path}"
-  else
-    curl -fsS -X "$method" \
-      -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      "${GITLAB_HOST}/api/v4${path}"
-  fi
-}
-
 # Auto-detect GitHub user if not set
 if [ -z "$GITHUB_USER" ]; then
   GITHUB_USER="$(gh_get "${GITHUB_API_URL}/user" 2>/dev/null | jq -r '.login // empty')"
   [ -n "$GITHUB_USER" ] || die "GITHUB_USER could not be autodetected (verify GITHUB_TOKEN or set GITHUB_USER)"
 fi
 
-# Auto-detect GitLab user if not set
-if [ -z "$GITLAB_USER" ]; then
-  GITLAB_USER="$(gitlab_api GET "/user" 2>/dev/null | jq -r '.username // empty')"
-  if [ -z "$GITLAB_USER" ] && [ -z "$GITLAB_GROUP" ]; then
-    die "GITLAB_USER could not be autodetected (verify GITLAB_TOKEN or set GITLAB_USER / GITLAB_GROUP)"
-  fi
-fi
-
+# GitLab target namespace (defaults to GITHUB_USER if GITLAB_USER is omitted)
+GITLAB_USER="${GITLAB_USER:-$GITHUB_USER}"
 GITLAB_NAMESPACE="${GITLAB_GROUP:-$GITLAB_USER}"
 GITLAB_NAMESPACE="${GITLAB_NAMESPACE#/}"
 GITLAB_NAMESPACE="${GITLAB_NAMESPACE%/}"
@@ -396,40 +372,6 @@ filter_repos() {
 }
 
 # ---------------------------------------------------------------------------
-# GitLab Helpers
-# ---------------------------------------------------------------------------
-gitlab_group_id() {
-  gitlab_api GET "/groups/$(urlencode "$GITLAB_GROUP")" 2>/dev/null | jq -r '.id'
-}
-
-ensure_gitlab_project() {
-  local name="$1" project_path namespace_id payload
-  [ "$GITLAB_AUTO_CREATE" = "true" ] || return 0
-
-  project_path="${GITLAB_NAMESPACE}/${name}"
-  if gitlab_api GET "/projects/$(urlencode "$project_path")" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  log "  + creating GitLab project: ${project_path}"
-  namespace_id=""
-  if [ -n "$GITLAB_GROUP" ]; then
-    namespace_id="$(gitlab_group_id)"
-    if [ -z "$namespace_id" ] || [ "$namespace_id" = "null" ]; then
-      log "  ERROR: cannot find GitLab group '${GITLAB_GROUP}'"
-      return 1
-    fi
-  fi
-
-  payload="$(jq -n \
-    --arg n "$name" --arg p "$name" --arg v "$GITLAB_VISIBILITY" --arg ns "$namespace_id" \
-    '{name:$n, path:$p, visibility:$v}
-     + (if $ns != "" then {namespace_id: ($ns|tonumber)} else {} end)')"
-
-  gitlab_api POST "/projects" "$payload" >/dev/null
-}
-
-# ---------------------------------------------------------------------------
 # Mirroring a single repository
 # ---------------------------------------------------------------------------
 refs_snapshot() {
@@ -466,15 +408,15 @@ mirror_repo_dry() {
   local n_gh
   n_gh="$(printf '%s\n' "$gh_refs" | grep -c . || true)"
 
-  local project_exists=0
-  if gitlab_api GET "/projects/$(urlencode "$project_path")" >/dev/null 2>&1; then
-    project_exists=1
-  else
-    log "  [dry-run] would create GitLab project: ${project_path}"
-  fi
-
   local gl_refs
   gl_refs="$(ls_refs "$GL_URL")"
+
+  local project_exists=0
+  if [ -n "$gl_refs" ]; then
+    project_exists=1
+  else
+    log "  [dry-run] would create GitLab project (via push): ${project_path}"
+  fi
 
   if [ "$project_exists" = "0" ] || [ "$gh_refs" != "$gl_refs" ]; then
     log "  ↑ $slug — would update (${n_gh} refs on GitHub, [dry-run])"
@@ -518,12 +460,6 @@ mirror_repo() {
     return $?
   fi
 
-  if ! ensure_gitlab_project "$name"; then
-    log "  ✗ $slug — could not prepare GitLab destination project"
-    FAILED+=("$slug (GitLab project)")
-    return 1
-  fi
-
   if [ ! -d "$dir" ]; then
     log "  • cloning $slug ..."
     mkdir -p "$(dirname "$dir")" || { FAILED+=("$slug (mkdir)"); return 1; }
@@ -554,7 +490,8 @@ mirror_repo() {
     | grep -v '\^{}' | awk '{print $1" "$2}' | sort || true)"
 
   if [ "$first" = 1 ] || [ "$changed" = 1 ] || [ "$remote_refs" != "$after" ] || [ "$PUSH_ALWAYS" = "true" ]; then
-    if ! run_git_cmd "$dir" push --mirror --quiet gitlab; then
+    if ! run_git_cmd "$dir" push --mirror --quiet -o project.visibility=private gitlab 2>/dev/null \
+      && ! run_git_cmd "$dir" push --mirror --quiet gitlab; then
       log "  ✗ $slug — 'git push' to GitLab failed"
       FAILED+=("$slug (push)")
       return 1

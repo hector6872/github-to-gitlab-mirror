@@ -133,8 +133,14 @@ if [ "$INTERACTIVE" = true ] && [ "$RECONFIGURE" = true ]; then
     sed -i.bak -e "s|^GITHUB_TOKEN=.*|GITHUB_TOKEN=\"$INPUT_GH_TOKEN\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
   fi
 
+  # GitLab user
+  read -r -p "GitLab Username (optional, press Enter to use same as GitHub): " INPUT_GL_USER || INPUT_GL_USER=""
+  if [ -n "$INPUT_GL_USER" ]; then
+    sed -i.bak -e "s|^#* *GITLAB_USER=.*|GITLAB_USER=\"$INPUT_GL_USER\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+  fi
+
   # GitLab token
-  read -r -p "GitLab Token (glpat_...): " INPUT_GL_TOKEN || INPUT_GL_TOKEN=""
+  read -r -p "GitLab Token (glpat_... with 'write_repository' scope): " INPUT_GL_TOKEN || INPUT_GL_TOKEN=""
   if [ -n "$INPUT_GL_TOKEN" ]; then
     sed -i.bak -e "s|^GITLAB_TOKEN=.*|GITLAB_TOKEN=\"$INPUT_GL_TOKEN\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
   fi
@@ -175,9 +181,10 @@ set -a; source "$ENV_FILE"; set +a
 
 GH_TOKEN="${GITHUB_TOKEN:-}"
 GL_TOKEN="${GITLAB_TOKEN:-}"
-GL_HOST="${GITLAB_HOST:-https://gitlab.com}"
-GL_HOST="${GL_HOST%/}"
+GL_USER="${GITLAB_USER:-}"
+GL_GROUP="${GITLAB_GROUP:-}"
 
+DETECTED_GH=""
 if [ -n "$GH_TOKEN" ] && [ "$GH_TOKEN" != "ghp_your_github_token" ] && [[ ! "$GH_TOKEN" =~ xxxxx ]]; then
   DETECTED_GH="$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
@@ -192,13 +199,8 @@ else
 fi
 
 if [ -n "$GL_TOKEN" ] && [ "$GL_TOKEN" != "glpat_your_gitlab_token" ] && [[ ! "$GL_TOKEN" =~ xxxxx ]]; then
-  DETECTED_GL="$(curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-    "${GL_HOST}/api/v4/user" 2>/dev/null | jq -r '.username // empty' || true)"
-  if [ -n "$DETECTED_GL" ]; then
-    success "GitLab token valid! Connected as: ${BOLD}$DETECTED_GL${RESET}"
-  else
-    warn "Could not verify GitLab token. Check token permissions."
-  fi
+  TARGET_NS="${GL_GROUP:-${GL_USER:-${DETECTED_GH:-personal}}}"
+  success "GitLab token configured (target namespace: ${BOLD}${TARGET_NS}${RESET})"
 else
   warn "GitLab token is not configured yet. Set GITLAB_TOKEN in .env"
 fi
