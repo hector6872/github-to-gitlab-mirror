@@ -50,23 +50,76 @@ for cmd in git curl jq; do
   fi
 done
 
+install_packages() {
+  local pkgs=("$@")
+  if [ "$(uname -s)" = "Darwin" ]; then
+    brew install "${pkgs[@]}"
+  elif [ -f /etc/debian_version ]; then
+    sudo apt update && sudo apt install -y "${pkgs[@]}"
+  elif [ -f /etc/arch-release ]; then
+    sudo pacman -S --noconfirm "${pkgs[@]}"
+  elif [ -f /etc/fedora-release ] || [ -f /etc/redhat-release ]; then
+    sudo dnf install -y "${pkgs[@]}"
+  elif [ -f /etc/alpine-release ]; then
+    apk add "${pkgs[@]}"
+  else
+    return 1
+  fi
+}
+
+show_manual_install_cmd() {
+  local pkgs=("$@")
+  if [ "$(uname -s)" = "Darwin" ]; then
+    echo "  brew install ${pkgs[*]}"
+  elif [ -f /etc/debian_version ]; then
+    echo "  sudo apt update && sudo apt install -y ${pkgs[*]}"
+  elif [ -f /etc/arch-release ]; then
+    echo "  sudo pacman -S --noconfirm ${pkgs[*]}"
+  elif [ -f /etc/fedora-release ] || [ -f /etc/redhat-release ]; then
+    echo "  sudo dnf install -y ${pkgs[*]}"
+  elif [ -f /etc/alpine-release ]; then
+    echo "  apk add ${pkgs[*]}"
+  else
+    echo "  Install using your system package manager: ${pkgs[*]}"
+  fi
+}
+
 if [ "${#MISSING_DEPS[@]}" -gt 0 ]; then
   echo
-  error "Please install missing required dependencies first:"
-  if [ "$(uname -s)" = "Darwin" ]; then
-    echo "  brew install ${MISSING_DEPS[*]}"
-  elif [ -f /etc/debian_version ]; then
-    echo "  sudo apt update && sudo apt install -y ${MISSING_DEPS[*]}"
-  elif [ -f /etc/arch-release ]; then
-    echo "  sudo pacman -S --noconfirm ${MISSING_DEPS[*]}"
-  elif [ -f /etc/fedora-release ] || [ -f /etc/redhat-release ]; then
-    echo "  sudo dnf install -y ${MISSING_DEPS[*]}"
-  elif [ -f /etc/alpine-release ]; then
-    echo "  apk add ${MISSING_DEPS[*]}"
+  warn "Missing required tool(s): ${MISSING_DEPS[*]}"
+  if [ "$INTERACTIVE" = true ]; then
+    read -r -p "Do you want to install missing required dependencies now? [Y/n]: " INSTALL_DEPS || INSTALL_DEPS="n"
+    if [[ ! "$INSTALL_DEPS" =~ ^[Nn]$ ]]; then
+      info "Installing ${MISSING_DEPS[*]}..."
+      install_packages "${MISSING_DEPS[@]}" || true
+
+      STILL_MISSING=()
+      for cmd in "${MISSING_DEPS[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+          STILL_MISSING+=("$cmd")
+        fi
+      done
+
+      if [ "${#STILL_MISSING[@]}" -eq 0 ]; then
+        success "Dependencies installed successfully!"
+      else
+        error "Could not automatically install: ${STILL_MISSING[*]}"
+        echo "Please install them manually:"
+        show_manual_install_cmd "${STILL_MISSING[@]}"
+        exit 1
+      fi
+    else
+      error "Cannot proceed without required dependencies: ${MISSING_DEPS[*]}"
+      echo "To continue setup later, install them manually:"
+      show_manual_install_cmd "${MISSING_DEPS[@]}"
+      exit 1
+    fi
   else
-    echo "  Install using your system package manager: ${MISSING_DEPS[*]}"
+    error "Missing required dependencies: ${MISSING_DEPS[*]}"
+    echo "Please install them first:"
+    show_manual_install_cmd "${MISSING_DEPS[@]}"
+    exit 1
   fi
-  exit 1
 fi
 
 # Check msmtp (optional email tool)
@@ -80,23 +133,14 @@ else
     read -r -p "Do you want to install msmtp now? [y/N]: " INSTALL_MSMTP || INSTALL_MSMTP="n"
     if [[ "$INSTALL_MSMTP" =~ ^[Yy]$ ]]; then
       info "Installing msmtp..."
-      if [ "$(uname -s)" = "Darwin" ]; then
-        brew install msmtp || true
-      elif [ -f /etc/debian_version ]; then
-        sudo apt update && sudo apt install -y msmtp || true
-      elif [ -f /etc/arch-release ]; then
-        sudo pacman -S --noconfirm msmtp || true
-      elif [ -f /etc/fedora-release ] || [ -f /etc/redhat-release ]; then
-        sudo dnf install -y msmtp || true
-      elif [ -f /etc/alpine-release ]; then
-        apk add msmtp || true
-      fi
+      install_packages msmtp || true
 
       if command -v msmtp >/dev/null 2>&1; then
         success "msmtp installed successfully!"
         HAS_MSMTP=true
       else
-        warn "Could not install msmtp automatically. You can install it manually later."
+        warn "Could not install msmtp automatically. You can install it manually later:"
+        show_manual_install_cmd msmtp
       fi
     fi
   fi
