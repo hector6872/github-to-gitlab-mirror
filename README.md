@@ -121,7 +121,7 @@ Mirrored repositories are stored in `./data/repos/` by default. Logging streams 
 | `GITHUB_API_URL` | GitHub API endpoint | `https://api.github.com` |
 | `GITHUB_ORGS` | Space-separated list of organizations to mirror | `""` |
 | `GITHUB_INCLUDE_FORKS` | Mirror forked repositories (`true` / `false`) | `false` |
-| `GITHUB_INCLUDE_ARCHIVED` | Mirror archived repositories (`true` / `false`) | `true` |
+| `GITHUB_SKIP_ARCHIVED` | Skip archived repositories (`true` / `false`) | `true` |
 | `GITHUB_EXCLUDE` | Space-separated patterns or globs to skip | `""` |
 | `GITLAB_USER` | GitLab username | Auto-detected from `GITLAB_TOKEN` |
 | `GITLAB_TOKEN` | GitLab access token | *(Required)* |
@@ -150,6 +150,8 @@ Usage:
   mirror.sh --repo SLUG     Mirror only a single repository ("owner/repo")
   mirror.sh --list          List discovered repositories without touching anything
   mirror.sh --dry-run       Preview actions without cloning or pushing
+  mirror.sh --skip-archived Skip archived repositories (default)
+  mirror.sh --include-archived Include archived repositories
   mirror.sh --help          Show help text
 ```
 

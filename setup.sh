@@ -37,7 +37,7 @@ printf "${BOLD}======================================================${RESET}\n"
 echo
 
 # ---------------------------------------------------------------------------
-# 1. Dependency checks
+# 1. Dependency checks & optional installations
 # ---------------------------------------------------------------------------
 info "Checking dependencies..."
 MISSING_DEPS=()
@@ -50,15 +50,9 @@ for cmd in git curl jq; do
   fi
 done
 
-if command -v msmtp >/dev/null 2>&1; then
-  success "Found msmtp (optional email support)"
-else
-  warn "msmtp not found (optional, only needed for email alerts)"
-fi
-
 if [ "${#MISSING_DEPS[@]}" -gt 0 ]; then
   echo
-  error "Please install missing dependencies first:"
+  error "Please install missing required dependencies first:"
   if [ "$(uname -s)" = "Darwin" ]; then
     echo "  brew install ${MISSING_DEPS[*]}"
   elif [ -f /etc/debian_version ]; then
@@ -73,6 +67,39 @@ if [ "${#MISSING_DEPS[@]}" -gt 0 ]; then
     echo "  Install using your system package manager: ${MISSING_DEPS[*]}"
   fi
   exit 1
+fi
+
+# Check msmtp (optional email tool)
+HAS_MSMTP=false
+if command -v msmtp >/dev/null 2>&1; then
+  success "Found msmtp (email support available)"
+  HAS_MSMTP=true
+else
+  warn "msmtp not found (needed for email alerts)"
+  if [ "$INTERACTIVE" = true ]; then
+    read -r -p "Do you want to install msmtp now? [y/N]: " INSTALL_MSMTP || INSTALL_MSMTP="n"
+    if [[ "$INSTALL_MSMTP" =~ ^[Yy]$ ]]; then
+      info "Installing msmtp..."
+      if [ "$(uname -s)" = "Darwin" ]; then
+        brew install msmtp || true
+      elif [ -f /etc/debian_version ]; then
+        sudo apt update && sudo apt install -y msmtp || true
+      elif [ -f /etc/arch-release ]; then
+        sudo pacman -S --noconfirm msmtp || true
+      elif [ -f /etc/fedora-release ] || [ -f /etc/redhat-release ]; then
+        sudo dnf install -y msmtp || true
+      elif [ -f /etc/alpine-release ]; then
+        apk add msmtp || true
+      fi
+
+      if command -v msmtp >/dev/null 2>&1; then
+        success "msmtp installed successfully!"
+        HAS_MSMTP=true
+      else
+        warn "Could not install msmtp automatically. You can install it manually later."
+      fi
+    fi
+  fi
 fi
 
 echo
@@ -117,6 +144,23 @@ if [ "$INTERACTIVE" = true ] && [ "$RECONFIGURE" = true ]; then
   if [ -n "$INPUT_GL_GROUP" ]; then
     sed -i.bak -e "s|^GITLAB_GROUP=.*|GITLAB_GROUP=\"$INPUT_GL_GROUP\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
   fi
+
+  # Optional Email configuration if msmtp is present
+  if [ "$HAS_MSMTP" = true ] || command -v msmtp >/dev/null 2>&1; then
+    echo
+    read -r -p "Configure email failure notifications? [y/N]: " CONFIGURE_EMAIL || CONFIGURE_EMAIL="n"
+    if [[ "$CONFIGURE_EMAIL" =~ ^[Yy]$ ]]; then
+      read -r -p "Recipient email address (EMAIL_TO): " INPUT_EMAIL_TO || INPUT_EMAIL_TO=""
+      if [ -n "$INPUT_EMAIL_TO" ]; then
+        sed -i.bak -e "s|^EMAIL_NOTIFY=.*|EMAIL_NOTIFY=\"true\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+        sed -i.bak -e "s|^EMAIL_TO=.*|EMAIL_TO=\"$INPUT_EMAIL_TO\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+        success "Email notifications enabled for: $INPUT_EMAIL_TO"
+        if [ ! -f "$HOME/.msmtprc" ]; then
+          info "Note: ~/.msmtprc not found. Remember to create your ~/.msmtprc (see README.md)."
+        fi
+      fi
+    fi
+  fi
 fi
 
 chmod 600 "$ENV_FILE"
@@ -160,7 +204,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Scheduling options (systemd / cron)
+# 4. Scheduling options (systemd vs cron)
 # ---------------------------------------------------------------------------
 echo
 info "Scheduling configuration..."
@@ -170,33 +214,60 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user list-units >/dev/nul
   HAS_SYSTEMD=true
 fi
 
-if [ "$HAS_SYSTEMD" = true ]; then
-  INSTALL_SYSTEMD="n"
-  if [ "$INTERACTIVE" = true ]; then
-    read -r -p "Install systemd user timer (runs daily at 03:00)? [Y/n]: " REPLY || REPLY="y"
-    [[ ! "$REPLY" =~ ^[Nn]$ ]] && INSTALL_SYSTEMD="y"
-  fi
+CRON_CMD="0 3 * * * $SCRIPT_DIR/mirror.sh >/dev/null 2>&1"
 
-  if [ "$INSTALL_SYSTEMD" = "y" ]; then
-    USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
-    mkdir -p "$USER_SYSTEMD_DIR"
+if [ "$INTERACTIVE" = true ]; then
+  echo "How would you like to schedule the daily mirror (03:00)?"
+  echo "  1) systemd (user timer, recommended on Linux)"
+  echo "  2) cron (crontab entry, macOS/Linux/BSD)"
+  echo "  3) none (skip automatic scheduling)"
+  read -r -p "Select option [1/2/3, default: 3]: " SCHED_CHOICE || SCHED_CHOICE="3"
 
-    # Generate custom service file with exact current directory
-    sed \
-      -e "s|%h/gitlab-mirror-gist|$SCRIPT_DIR|g" \
-      "$SCRIPT_DIR/systemd/github-mirror.service" > "$USER_SYSTEMD_DIR/github-mirror.service"
+  case "$SCHED_CHOICE" in
+    1|systemd)
+      if [ "$HAS_SYSTEMD" = true ]; then
+        USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
+        mkdir -p "$USER_SYSTEMD_DIR"
 
-    cp "$SCRIPT_DIR/systemd/github-mirror.timer" "$USER_SYSTEMD_DIR/github-mirror.timer"
+        # Generate custom service file with exact current directory
+        sed \
+          -e "s|%h/gitlab-mirror-gist|$SCRIPT_DIR|g" \
+          "$SCRIPT_DIR/systemd/github-mirror.service" > "$USER_SYSTEMD_DIR/github-mirror.service"
 
-    systemctl --user daemon-reload
-    systemctl --user enable --now github-mirror.timer
-    success "systemd user timer enabled and active!"
-    info "Check status anytime with: systemctl --user list-timers github-mirror.timer"
+        cp "$SCRIPT_DIR/systemd/github-mirror.timer" "$USER_SYSTEMD_DIR/github-mirror.timer"
+
+        systemctl --user daemon-reload
+        systemctl --user enable --now github-mirror.timer
+        success "systemd user timer enabled and active!"
+        info "Check status anytime with: systemctl --user list-timers github-mirror.timer"
+      else
+        warn "systemd user session is not available on this system."
+        read -r -p "Fall back to cron? [Y/n]: " CRON_FALLBACK || CRON_FALLBACK="y"
+        if [[ ! "$CRON_FALLBACK" =~ ^[Nn]$ ]]; then
+          SCHED_CHOICE="2"
+        fi
+      fi
+      ;;
+  esac
+
+  if [ "$SCHED_CHOICE" = "2" ] || [ "$SCHED_CHOICE" = "cron" ]; then
+    read -r -p "Automatically add daily job to your crontab? [Y/n]: " ADD_CRON || ADD_CRON="y"
+    if [[ ! "$ADD_CRON" =~ ^[Nn]$ ]]; then
+      CURRENT_CRON="$(crontab -l 2>/dev/null || true)"
+      if echo "$CURRENT_CRON" | grep -Fq "$SCRIPT_DIR/mirror.sh"; then
+        warn "Crontab already contains an entry for mirror.sh"
+      else
+        printf "%s\n%s\n" "$CURRENT_CRON" "$CRON_CMD" | grep -v '^$' | crontab -
+        success "Added daily job to crontab (runs at 03:00)!"
+      fi
+    else
+      info "Add manually to your crontab (crontab -e):"
+      echo "  $CRON_CMD"
+    fi
   fi
 else
-  echo "Cron suggestion for daily sync at 03:00:"
-  echo "  0 3 * * * $SCRIPT_DIR/mirror.sh >/dev/null 2>&1"
-  echo "Add to crontab with: crontab -e"
+  info "Non-interactive mode: skipping scheduling. Cron suggestion:"
+  echo "  $CRON_CMD"
 fi
 
 # ---------------------------------------------------------------------------

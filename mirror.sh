@@ -58,11 +58,13 @@ usage() {
 $PROG $VERSION — GitHub -> GitLab mirror
 
 Usage:
-  $PROG                Mirror every repository of the configured account.
-  $PROG --repo SLUG    Mirror only "owner/repo".
-  $PROG --list         List repositories without mirroring anything.
-  $PROG --dry-run      Preview actions without cloning, creating projects, or pushing.
-  $PROG --help         Show this help.
+  $PROG                    Mirror every repository of the configured account.
+  $PROG --repo SLUG        Mirror only "owner/repo".
+  $PROG --list             List repositories without mirroring anything.
+  $PROG --dry-run          Preview actions without cloning, creating projects, or pushing.
+  $PROG --skip-archived    Skip archived repositories (default).
+  $PROG --include-archived Include archived repositories.
+  $PROG --help             Show this help.
 
 Configuration:
   Defaults to .env file in project root ($BASE_DIR/.env),
@@ -89,12 +91,15 @@ MODE="all"
 ONLY_REPO=""
 DRY_RUN="false"
 CLI_DRY_RUN=""
+CLI_SKIP_ARCHIVED=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) ONLY_REPO="${2:-}"; MODE="one"; shift 2 ;;
     --repo=*) ONLY_REPO="${1#*=}"; MODE="one"; shift ;;
     --list) MODE="list"; shift ;;
     -n|--dry-run) DRY_RUN="true"; CLI_DRY_RUN="true"; shift ;;
+    --skip-archived) CLI_SKIP_ARCHIVED="true"; shift ;;
+    --include-archived) CLI_SKIP_ARCHIVED="false"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1 (try --help)" >&2; exit 2 ;;
   esac
@@ -116,7 +121,15 @@ GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
 GITHUB_ORGS="${GITHUB_ORGS:-}"
 GITHUB_INCLUDE_FORKS="${GITHUB_INCLUDE_FORKS:-false}"
-GITHUB_INCLUDE_ARCHIVED="${GITHUB_INCLUDE_ARCHIVED:-true}"
+GITHUB_SKIP_ARCHIVED="${GITHUB_SKIP_ARCHIVED:-}"
+if [ -z "$GITHUB_SKIP_ARCHIVED" ] && [ -n "${GITHUB_INCLUDE_ARCHIVED:-}" ]; then
+  [ "$GITHUB_INCLUDE_ARCHIVED" = "true" ] && GITHUB_SKIP_ARCHIVED="false" || GITHUB_SKIP_ARCHIVED="true"
+fi
+GITHUB_SKIP_ARCHIVED="${GITHUB_SKIP_ARCHIVED:-true}"
+if [ -n "$CLI_SKIP_ARCHIVED" ]; then
+  GITHUB_SKIP_ARCHIVED="$CLI_SKIP_ARCHIVED"
+fi
+[ "$GITHUB_SKIP_ARCHIVED" = "true" ] && GITHUB_INCLUDE_ARCHIVED="false" || GITHUB_INCLUDE_ARCHIVED="true"
 GITHUB_EXCLUDE="${GITHUB_EXCLUDE:-}"
 
 GITLAB_USER="${GITLAB_USER:-}"
