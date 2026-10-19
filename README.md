@@ -178,11 +178,25 @@ systemctl --user daemon-reload
 systemctl --user enable --now github-mirror.timer
 ```
 
-Check status:
+#### Monitoring & Checking Last Execution
+
+Check when the script last ran and view outputs:
+
 ```bash
-systemctl --user list-timers
+# View last execution time and next scheduled run
+systemctl --user list-timers github-mirror.timer
+
+# View service status and completion timestamp
 systemctl --user status github-mirror.service
+
+# View last 50 log lines of execution output
+journalctl --user -u github-mirror.service -n 50 --no-pager
+
+# Stream logs in real-time
+journalctl --user -u github-mirror.service -f
 ```
+
+*(If `LOG_DIR="./logs"` is set in `.env`, you can also view `logs/latest.log`)*
 
 ### Option B: Cron (macOS / Linux / BSD)
 
@@ -195,7 +209,32 @@ crontab -e
 Add a daily job at 03:00:
 
 ```cron
+# Option 1: Log output to a file (recommended for easy monitoring)
+0 3 * * * /path/to/github-gitlab-mirror/mirror.sh >> /path/to/github-gitlab-mirror/cron.log 2>&1
+
+# Option 2: Discard stdout/stderr (rely on LOG_DIR in .env or notifications)
 0 3 * * * /path/to/github-gitlab-mirror/mirror.sh >/dev/null 2>&1
+```
+
+#### Monitoring & Checking Last Execution (Cron)
+
+```bash
+# View last execution output (if using Option 1 above)
+tail -n 50 /path/to/github-gitlab-mirror/cron.log
+
+# If LOG_DIR="./logs" is set in .env:
+ls -l logs/latest.log
+tail -n 50 logs/latest.log
+
+# Check system cron daemon logs:
+# macOS:
+log show --predicate 'process == "cron"' --last 24h
+
+# Debian / Ubuntu / Raspberry Pi:
+grep CRON /var/log/syslog | grep mirror.sh | tail -n 10
+
+# Fedora / RHEL / Arch:
+journalctl -u crond -e
 ```
 
 ---
