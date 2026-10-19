@@ -455,6 +455,17 @@ mirror_repo() {
   dir="$MIRROR_DIR/$owner/$name.git"
   repo_urls "$owner" "$name"
 
+  # Skip if repository is archived on GitHub
+  if [ "$GITHUB_INCLUDE_ARCHIVED" != "true" ] && [ "$MODE" = "one" ]; then
+    local is_archived
+    is_archived="$(gh_get "${GITHUB_API_URL}/repos/$slug" 2>/dev/null | jq -r '.archived // false' || true)"
+    if [ "$is_archived" = "true" ]; then
+      log "  · $slug — skipped (archived on GitHub)"
+      SKIPPED+=("$slug")
+      return 0
+    fi
+  fi
+
   if [ "$DRY_RUN" = "true" ]; then
     mirror_repo_dry "$slug" "$name"
     return $?
@@ -490,9 +501,16 @@ mirror_repo() {
     | grep -v '\^{}' | awk '{print $1" "$2}' | sort || true)"
 
   if [ "$first" = 1 ] || [ "$changed" = 1 ] || [ "$remote_refs" != "$after" ] || [ "$PUSH_ALWAYS" = "true" ]; then
-    if ! run_git_cmd "$dir" push --mirror --quiet -o project.visibility=private gitlab 2>/dev/null \
-      && ! run_git_cmd "$dir" push --mirror --quiet gitlab; then
+    local push_err
+    if ! push_err="$(git -C "$dir" push --mirror --quiet -o project.visibility=private gitlab 2>&1)" \
+      && ! push_err="$(git -C "$dir" push --mirror --quiet gitlab 2>&1)"; then
+      if echo "$push_err" | grep -qi "read-only repository\|archived"; then
+        log "  · $slug — skipped (repository is archived/read-only on GitLab)"
+        SKIPPED+=("$slug")
+        return 0
+      fi
       log "  ✗ $slug — 'git push' to GitLab failed"
+      [ -n "$push_err" ] && log "    $push_err"
       FAILED+=("$slug (push)")
       return 1
     fi
