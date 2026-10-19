@@ -316,7 +316,7 @@ CRON_CMD="0 3 * * * $SCRIPT_DIR/mirror.sh >/dev/null 2>&1"
 
 if [ "$INTERACTIVE" = true ]; then
   echo "How would you like to schedule the daily mirror (03:00)?"
-  echo "  1) systemd (user timer, recommended on Linux)"
+  echo "  1) systemd (system timer in /etc/systemd/system, Linux)"
   echo "  2) cron (crontab entry, macOS/Linux/BSD)"
   echo "  3) none (skip automatic scheduling)"
   read -r -p "Select option [1/2/3, default: 3]: " SCHED_CHOICE || SCHED_CHOICE="3"
@@ -324,34 +324,33 @@ if [ "$INTERACTIVE" = true ]; then
   case "$SCHED_CHOICE" in
     1|systemd)
       if [ "$HAS_SYSTEMD" = true ]; then
-        USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
-        mkdir -p "$USER_SYSTEMD_DIR"
+        RUN_USER="${SUDO_USER:-$USER}"
+        info "Installing systemd system timer for user '$RUN_USER'..."
 
-        # Generate custom service file with exact current directory
+        SUDO_CMD=""
+        if [ "$EUID" -ne 0 ]; then
+          if command -v sudo >/dev/null 2>&1; then
+            SUDO_CMD="sudo"
+          else
+            error "Root privileges or sudo required to install systemd system service."
+            exit 1
+          fi
+        fi
+
+        # Generate custom service file with exact current directory and user
         sed \
           -e "s|%h/gitlab-mirror-gist|$SCRIPT_DIR|g" \
-          "$SCRIPT_DIR/systemd/github-mirror.service" > "$USER_SYSTEMD_DIR/github-mirror.service"
+          -e "s|%u|$RUN_USER|g" \
+          "$SCRIPT_DIR/systemd/github-mirror.service" | $SUDO_CMD tee /etc/systemd/system/github-mirror.service >/dev/null
 
-        cp "$SCRIPT_DIR/systemd/github-mirror.timer" "$USER_SYSTEMD_DIR/github-mirror.timer"
+        $SUDO_CMD cp "$SCRIPT_DIR/systemd/github-mirror.timer" /etc/systemd/system/github-mirror.timer
+        $SUDO_CMD chmod 644 /etc/systemd/system/github-mirror.service /etc/systemd/system/github-mirror.timer
 
-        if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
-          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-        fi
-
-        if systemctl --user daemon-reload 2>/dev/null && systemctl --user enable --now github-mirror.timer 2>/dev/null; then
-          success "systemd user timer enabled and active!"
-          info "Check status anytime with: systemctl --user list-timers github-mirror.timer"
-          if command -v loginctl >/dev/null 2>&1; then
-            loginctl enable-linger "$USER" 2>/dev/null || true
-          fi
-        else
-          warn "Unit files installed to $USER_SYSTEMD_DIR, but 'systemctl --user' could not reach D-Bus."
-          echo "  Run these commands to activate manually:"
-          echo "    export XDG_RUNTIME_DIR=/run/user/\$(id -u)"
-          echo "    systemctl --user daemon-reload"
-          echo "    systemctl --user enable --now github-mirror.timer"
-          echo "    loginctl enable-linger \$USER"
-        fi
+        $SUDO_CMD systemctl daemon-reload
+        $SUDO_CMD systemctl enable --now github-mirror.timer
+        success "systemd system timer enabled and active!"
+        info "Check status anytime with: ${SUDO_CMD:+$SUDO_CMD }systemctl list-timers github-mirror.timer"
+        info "View logs anytime with: ${SUDO_CMD:+$SUDO_CMD }journalctl -u github-mirror.service -f"
       else
         warn "systemctl is not available on this system."
         read -r -p "Fall back to cron? [Y/n]: " CRON_FALLBACK || CRON_FALLBACK="y"

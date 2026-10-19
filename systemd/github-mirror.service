@@ -5,8 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-# Adjust WorkingDirectory to your repository directory if running as system service,
-# or place in ~/.config/systemd/user/ for non-root user timer.
+User=%u
 WorkingDirectory=%h/gitlab-mirror-gist
 ExecStart=%h/gitlab-mirror-gist/mirror.sh
 EnvironmentFile=-%h/gitlab-mirror-gist/.env
@@ -15,11 +14,11 @@ EnvironmentFile=-%h/gitlab-mirror-gist/.env
 Nice=10
 IOSchedulingClass=idle
 
-# Logs go to the journal (journalctl --user -u github-mirror.service)
+# Logs go to the journal (journalctl -u github-mirror.service)
 StandardOutput=journal
 StandardError=journal
 
 TimeoutStartSec=2h
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
