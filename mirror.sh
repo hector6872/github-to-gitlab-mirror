@@ -47,6 +47,8 @@ declare -a REPAIRED=()
 declare -a SKIPPED=()
 declare -a FAILED=()
 declare -a FILTERED=()
+declare -a ARCHIVED_SKIPPED=()
+declare -a COLLECTED_REPOS=()
 KEPT=""
 LOG_FILE=""
 
@@ -58,11 +60,13 @@ usage() {
 $PROG $VERSION — GitHub -> GitLab mirror
 
 Usage:
-  $PROG                Mirror every repository of the configured account.
-  $PROG --repo SLUG    Mirror only "owner/repo".
-  $PROG --list         List repositories without mirroring anything.
-  $PROG --dry-run      Preview actions without cloning, creating projects, or pushing.
-  $PROG --help         Show this help.
+  $PROG                    Mirror every repository of the configured account.
+  $PROG --repo SLUG        Mirror only "owner/repo".
+  $PROG --list             List repositories without mirroring anything.
+  $PROG --dry-run          Preview actions without cloning, creating projects, or pushing.
+  $PROG --skip-archived    Skip archived repositories (default).
+  $PROG --include-archived Include archived repositories.
+  $PROG --help             Show this help.
 
 Configuration:
   Defaults to .env file in project root ($BASE_DIR/.env),
@@ -89,12 +93,15 @@ MODE="all"
 ONLY_REPO=""
 DRY_RUN="false"
 CLI_DRY_RUN=""
+CLI_SKIP_ARCHIVED=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) ONLY_REPO="${2:-}"; MODE="one"; shift 2 ;;
     --repo=*) ONLY_REPO="${1#*=}"; MODE="one"; shift ;;
     --list) MODE="list"; shift ;;
     -n|--dry-run) DRY_RUN="true"; CLI_DRY_RUN="true"; shift ;;
+    --skip-archived) CLI_SKIP_ARCHIVED="true"; shift ;;
+    --include-archived) CLI_SKIP_ARCHIVED="false"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1 (try --help)" >&2; exit 2 ;;
   esac
@@ -116,15 +123,16 @@ GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
 GITHUB_ORGS="${GITHUB_ORGS:-}"
 GITHUB_INCLUDE_FORKS="${GITHUB_INCLUDE_FORKS:-false}"
-GITHUB_INCLUDE_ARCHIVED="${GITHUB_INCLUDE_ARCHIVED:-true}"
+GITHUB_INCLUDE_ARCHIVED="${GITHUB_INCLUDE_ARCHIVED:-false}"
+if [ -n "$CLI_SKIP_ARCHIVED" ]; then
+  [ "$CLI_SKIP_ARCHIVED" = "true" ] && GITHUB_INCLUDE_ARCHIVED="false" || GITHUB_INCLUDE_ARCHIVED="true"
+fi
 GITHUB_EXCLUDE="${GITHUB_EXCLUDE:-}"
 
 GITLAB_USER="${GITLAB_USER:-}"
 GITLAB_TOKEN="${GITLAB_TOKEN:-}"
 GITLAB_HOST="${GITLAB_HOST:-https://gitlab.com}"
 GITLAB_GROUP="${GITLAB_GROUP:-}"
-GITLAB_VISIBILITY="${GITLAB_VISIBILITY:-private}"
-GITLAB_AUTO_CREATE="${GITLAB_AUTO_CREATE:-true}"
 GITLAB_SSH_HOST="${GITLAB_SSH_HOST:-gitlab.com}"
 
 MIRROR_DIR="${MIRROR_DIR:-$BASE_DIR/data/repos}"
@@ -157,21 +165,41 @@ GITLAB_HOST="${GITLAB_HOST%/}"
 GITHUB_API_URL="${GITHUB_API_URL%/}"
 GITLAB_HOSTNAME="${GITLAB_HOST#*://}"
 GITLAB_HOSTNAME="${GITLAB_HOSTNAME%%/*}"
-GITLAB_NAMESPACE="${GITLAB_GROUP:-$GITLAB_USER}"
-GITLAB_NAMESPACE="${GITLAB_NAMESPACE#/}"
-GITLAB_NAMESPACE="${GITLAB_NAMESPACE%/}"
 
 # CLI dry-run override
 [ "$CLI_DRY_RUN" = "true" ] && DRY_RUN="true"
 
-# Validate required variables & dependencies
-[ -n "$GITHUB_USER" ]  || die "GITHUB_USER is required (set in .env or environment)"
-[ -n "$GITHUB_TOKEN" ] || die "GITHUB_TOKEN is required (set in .env or environment)"
-[ -n "$GITLAB_USER" ]  || die "GITLAB_USER is required (set in .env or environment)"
-[ -n "$GITLAB_TOKEN" ] || die "GITLAB_TOKEN is required (set in .env or environment)"
+# Validate tools & tokens
 command -v git >/dev/null 2>&1 || die "git is not installed (please install git)"
 command -v curl >/dev/null 2>&1 || die "curl is not installed (please install curl)"
 command -v jq >/dev/null 2>&1 || die "jq is not installed (please install jq)"
+
+[ -n "$GITHUB_TOKEN" ] || die "GITHUB_TOKEN is required (set in .env or environment)"
+[ -n "$GITLAB_TOKEN" ] || die "GITLAB_TOKEN is required (set in .env or environment)"
+
+# ---------------------------------------------------------------------------
+# GitHub API (Repository Discovery)
+# ---------------------------------------------------------------------------
+gh_get() {
+  curl -fsS \
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "$1"
+}
+
+# Auto-detect GitHub user if not set
+if [ -z "$GITHUB_USER" ]; then
+  GITHUB_USER="$(gh_get "${GITHUB_API_URL}/user" 2>/dev/null | jq -r '.login // empty')"
+  [ -n "$GITHUB_USER" ] || die "GITHUB_USER could not be autodetected (verify GITHUB_TOKEN or set GITHUB_USER)"
+fi
+
+# GitLab target namespace (defaults to GITHUB_USER if GITLAB_USER is omitted)
+GITLAB_USER="${GITLAB_USER:-$GITHUB_USER}"
+GITLAB_NAMESPACE="${GITLAB_GROUP:-$GITLAB_USER}"
+GITLAB_NAMESPACE="${GITLAB_NAMESPACE#/}"
+GITLAB_NAMESPACE="${GITLAB_NAMESPACE%/}"
+[ -n "$GITLAB_NAMESPACE" ] || die "GitLab target namespace could not be determined (set GITLAB_USER or GITLAB_GROUP)"
 
 # ---------------------------------------------------------------------------
 # Directories and log file
@@ -211,8 +239,14 @@ build_report() {
     echo "Updated                : ${#UPDATED[@]}"
     echo "Repaired               : ${#REPAIRED[@]}"
     echo "Unchanged              : ${#SKIPPED[@]}"
+    echo "Skipped (archived)     : ${#ARCHIVED_SKIPPED[@]}"
     echo "Failed                 : ${#FAILED[@]}"
     echo "Excluded by filter     : ${#FILTERED[@]}"
+    if [ "${#ARCHIVED_SKIPPED[@]}" -gt 0 ]; then
+      echo
+      echo "Archived repositories skipped:"
+      printf '  - %s\n' "${ARCHIVED_SKIPPED[@]}"
+    fi
     if [ "${#FAILED[@]}" -gt 0 ]; then
       echo
       echo "Repositories with errors:"
@@ -285,22 +319,21 @@ finish() {
 trap finish EXIT
 
 # ---------------------------------------------------------------------------
-# GitHub API
+# GitHub Repository Discovery
 # ---------------------------------------------------------------------------
-gh_get() {
-  curl -fsS \
-    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "$1"
-}
-
 list_user_repos() {
   local filter="$1" page=1 json n
   while :; do
     json="$(gh_get "${GITHUB_API_URL}/user/repos?affiliation=owner&per_page=100&page=${page}&sort=full_name")" || return 1
     n="$(printf '%s' "$json" | jq 'length')"
-    printf '%s' "$json" | jq -r "$filter"
+    if [ "$GITHUB_INCLUDE_ARCHIVED" != "true" ]; then
+      while IFS= read -r arch_slug; do
+        [ -n "$arch_slug" ] && ARCHIVED_SKIPPED+=("$arch_slug")
+      done < <(printf '%s' "$json" | jq -r '.[] | select(.archived == true) | .full_name')
+    fi
+    while IFS= read -r slug; do
+      [ -n "$slug" ] && COLLECTED_REPOS+=("$slug")
+    done < <(printf '%s' "$json" | jq -r "$filter")
     [ "$n" -lt 100 ] && break
     page=$((page + 1))
   done
@@ -311,13 +344,21 @@ list_org_repos() {
   while :; do
     json="$(gh_get "${GITHUB_API_URL}/orgs/${org}/repos?type=all&per_page=100&page=${page}&sort=full_name")" || return 1
     n="$(printf '%s' "$json" | jq 'length')"
-    printf '%s' "$json" | jq -r "$filter"
+    if [ "$GITHUB_INCLUDE_ARCHIVED" != "true" ]; then
+      while IFS= read -r arch_slug; do
+        [ -n "$arch_slug" ] && ARCHIVED_SKIPPED+=("$arch_slug")
+      done < <(printf '%s' "$json" | jq -r '.[] | select(.archived == true) | .full_name')
+    fi
+    while IFS= read -r slug; do
+      [ -n "$slug" ] && COLLECTED_REPOS+=("$slug")
+    done < <(printf '%s' "$json" | jq -r "$filter")
     [ "$n" -lt 100 ] && break
     page=$((page + 1))
   done
 }
 
 collect_repos() {
+  COLLECTED_REPOS=()
   local filter; filter="$(build_filter)"
   list_user_repos "$filter" || return 1
   local org
@@ -340,67 +381,17 @@ is_excluded() {
 }
 
 filter_repos() {
-  local input="$1" slug
+  local slug
   KEPT=""
-  while IFS= read -r slug; do
+  for slug in "${COLLECTED_REPOS[@]}"; do
     [ -n "$slug" ] || continue
     if is_excluded "$slug"; then
       FILTERED+=("$slug")
     else
       KEPT+="$slug"$'\n'
     fi
-  done <<<"$input"
+  done
   KEPT="${KEPT%$'\n'}"
-}
-
-# ---------------------------------------------------------------------------
-# GitLab API
-# ---------------------------------------------------------------------------
-urlencode() { jq -rn --arg s "$1" '$s | @uri'; }
-
-gitlab_api() {
-  local method="$1" path="$2" data="${3:-}"
-  if [ -n "$data" ]; then
-    curl -fsS -X "$method" \
-      -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d "$data" "${GITLAB_HOST}/api/v4${path}"
-  else
-    curl -fsS -X "$method" \
-      -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      "${GITLAB_HOST}/api/v4${path}"
-  fi
-}
-
-gitlab_group_id() {
-  gitlab_api GET "/groups/$(urlencode "$GITLAB_GROUP")" 2>/dev/null | jq -r '.id'
-}
-
-ensure_gitlab_project() {
-  local name="$1" project_path namespace_id payload
-  [ "$GITLAB_AUTO_CREATE" = "true" ] || return 0
-
-  project_path="${GITLAB_NAMESPACE}/${name}"
-  if gitlab_api GET "/projects/$(urlencode "$project_path")" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  log "  + creating GitLab project: ${project_path}"
-  namespace_id=""
-  if [ -n "$GITLAB_GROUP" ]; then
-    namespace_id="$(gitlab_group_id)"
-    if [ -z "$namespace_id" ] || [ "$namespace_id" = "null" ]; then
-      log "  ERROR: cannot find GitLab group '${GITLAB_GROUP}'"
-      return 1
-    fi
-  fi
-
-  payload="$(jq -n \
-    --arg n "$name" --arg p "$name" --arg v "$GITLAB_VISIBILITY" --arg ns "$namespace_id" \
-    '{name:$n, path:$p, visibility:$v}
-     + (if $ns != "" then {namespace_id: ($ns|tonumber)} else {} end)')"
-
-  gitlab_api POST "/projects" "$payload" >/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -440,15 +431,15 @@ mirror_repo_dry() {
   local n_gh
   n_gh="$(printf '%s\n' "$gh_refs" | grep -c . || true)"
 
-  local project_exists=0
-  if gitlab_api GET "/projects/$(urlencode "$project_path")" >/dev/null 2>&1; then
-    project_exists=1
-  else
-    log "  [dry-run] would create GitLab project: ${project_path}"
-  fi
-
   local gl_refs
   gl_refs="$(ls_refs "$GL_URL")"
+
+  local project_exists=0
+  if [ -n "$gl_refs" ]; then
+    project_exists=1
+  else
+    log "  [dry-run] would create GitLab project (via push): ${project_path}"
+  fi
 
   if [ "$project_exists" = "0" ] || [ "$gh_refs" != "$gl_refs" ]; then
     log "  ↑ $slug — would update (${n_gh} refs on GitHub, [dry-run])"
@@ -487,15 +478,20 @@ mirror_repo() {
   dir="$MIRROR_DIR/$owner/$name.git"
   repo_urls "$owner" "$name"
 
+  # Skip if repository is archived on GitHub
+  if [ "$GITHUB_INCLUDE_ARCHIVED" != "true" ] && [ "$MODE" = "one" ]; then
+    local is_archived
+    is_archived="$(gh_get "${GITHUB_API_URL}/repos/$slug" 2>/dev/null | jq -r '.archived // false' || true)"
+    if [ "$is_archived" = "true" ]; then
+      log "  · $slug — skipped (archived on GitHub)"
+      ARCHIVED_SKIPPED+=("$slug")
+      return 0
+    fi
+  fi
+
   if [ "$DRY_RUN" = "true" ]; then
     mirror_repo_dry "$slug" "$name"
     return $?
-  fi
-
-  if ! ensure_gitlab_project "$name"; then
-    log "  ✗ $slug — could not prepare GitLab destination project"
-    FAILED+=("$slug (GitLab project)")
-    return 1
   fi
 
   if [ ! -d "$dir" ]; then
@@ -512,6 +508,10 @@ mirror_repo() {
     git -C "$dir" remote set-url gitlab "$GL_URL" 2>/dev/null || git -C "$dir" remote add gitlab "$GL_URL"
   fi
 
+  # Clean up any tracking refs that trigger GitLab "deny updating a hidden ref"
+  rm -rf "$dir/refs/remotes"
+  git -C "$dir" config --unset-all remote.gitlab.fetch 2>/dev/null || true
+
   local before after remote_refs changed=0
   before="$(refs_snapshot "$dir")"
 
@@ -527,28 +527,37 @@ mirror_repo() {
   remote_refs="$(git -C "$dir" ls-remote --heads --tags gitlab 2>/dev/null \
     | grep -v '\^{}' | awk '{print $1" "$2}' | sort || true)"
 
-  if [ "$first" = 1 ] || [ "$changed" = 1 ] || [ "$remote_refs" != "$after" ] || [ "$PUSH_ALWAYS" = "true" ]; then
-    if ! run_git_cmd "$dir" push --mirror --quiet gitlab; then
-      log "  ✗ $slug — 'git push' to GitLab failed"
-      FAILED+=("$slug (push)")
-      return 1
-    fi
-    if [ "$first" = 1 ]; then
-      log "  + $slug — mirror created"
-      UPDATED+=("$slug")
-    elif [ "$changed" = 1 ]; then
-      log "  ↑ $slug — updated"
-      UPDATED+=("$slug")
-    elif [ "$remote_refs" != "$after" ]; then
-      log "  = $slug — repaired (remote was out of sync)"
-      REPAIRED+=("$slug")
-    else
-      log "  · $slug — unchanged"
-      SKIPPED+=("$slug")
-    fi
-  else
+  # If remote is already in sync with local refs, skip pushing
+  if [ -n "$remote_refs" ] && [ "$remote_refs" = "$after" ]; then
     log "  · $slug — unchanged"
     SKIPPED+=("$slug")
+    return 0
+  fi
+
+  local push_refspecs=('+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*')
+  local push_err
+  if ! push_err="$(git -C "$dir" push --prune --force --quiet -o project.visibility=private gitlab "${push_refspecs[@]}" 2>&1)" \
+    && ! push_err="$(git -C "$dir" push --prune --force --quiet gitlab "${push_refspecs[@]}" 2>&1)"; then
+    if echo "$push_err" | grep -qi "read-only repository\|archived"; then
+      log "  · $slug — skipped (repository is archived/read-only on GitLab)"
+      SKIPPED+=("$slug")
+      return 0
+    fi
+    log "  ✗ $slug — 'git push' to GitLab failed"
+    [ -n "$push_err" ] && log "    $push_err"
+    FAILED+=("$slug (push)")
+    return 1
+  fi
+
+  if [ -z "$remote_refs" ]; then
+    log "  + $slug — mirror created"
+    UPDATED+=("$slug")
+  elif [ "$changed" = 1 ]; then
+    log "  ↑ $slug — updated"
+    UPDATED+=("$slug")
+  else
+    log "  = $slug — repaired (remote was out of sync)"
+    REPAIRED+=("$slug")
   fi
   return 0
 }
@@ -564,10 +573,10 @@ main() {
   if [ "$MODE" = "one" ]; then
     repos="$ONLY_REPO"
   else
-    if ! repos="$(collect_repos)"; then
+    if ! collect_repos; then
       die "Could not fetch repository list from GitHub (check token and permissions)"
     fi
-    filter_repos "$repos"
+    filter_repos
     repos="$KEPT"
   fi
 
@@ -593,7 +602,21 @@ main() {
     mirror_repo "$repo" || true
   done <<<"$repos"
 
-  log "===== ${tag}Summary: $TOTAL repos | ${#UPDATED[@]} updated | ${#REPAIRED[@]} repaired | ${#SKIPPED[@]} unchanged | ${#FAILED[@]} failed | ${#FILTERED[@]} excluded | $((SECONDS - START_TS))s ====="
+  if [ "${#ARCHIVED_SKIPPED[@]}" -gt 0 ]; then
+    log "Archived repositories skipped (${#ARCHIVED_SKIPPED[@]}):"
+    for repo in "${ARCHIVED_SKIPPED[@]}"; do
+      log "  · $repo"
+    done
+  fi
+
+  if [ "${#FAILED[@]}" -gt 0 ]; then
+    log "Repositories with errors (${#FAILED[@]}):"
+    for repo in "${FAILED[@]}"; do
+      log "  ✗ $repo"
+    done
+  fi
+
+  log "===== ${tag}Summary: $TOTAL repos | ${#UPDATED[@]} updated | ${#REPAIRED[@]} repaired | ${#SKIPPED[@]} unchanged | ${#ARCHIVED_SKIPPED[@]} archived | ${#FAILED[@]} failed | ${#FILTERED[@]} excluded | $((SECONDS - START_TS))s ====="
   return 0
 }
 
