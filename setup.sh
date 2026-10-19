@@ -206,7 +206,59 @@ if [ "$INTERACTIVE" = true ] && [ "$RECONFIGURE" = true ]; then
         sed -i.bak -e "s|^EMAIL_TO=.*|EMAIL_TO=\"$INPUT_EMAIL_TO\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
         success "Email notifications enabled for: $INPUT_EMAIL_TO"
         if [ ! -f "$HOME/.msmtprc" ]; then
-          info "Note: ~/.msmtprc not found. Remember to create your ~/.msmtprc (see README.md)."
+          echo
+          read -r -p "~/.msmtprc not found. Would you like to configure it now? [Y/n]: " CONFIGURE_MSMTPRC || CONFIGURE_MSMTPRC="y"
+          if [[ ! "$CONFIGURE_MSMTPRC" =~ ^[Nn]$ ]]; then
+            default_host="smtp.gmail.com"
+            read -r -p "SMTP Host [default: $default_host]: " MSMTP_HOST || MSMTP_HOST=""
+            MSMTP_HOST="${MSMTP_HOST:-$default_host}"
+
+            read -r -p "SMTP Port [default: 587]: " MSMTP_PORT || MSMTP_PORT=""
+            MSMTP_PORT="${MSMTP_PORT:-587}"
+
+            read -r -p "SMTP Username / Sender email [default: $INPUT_EMAIL_TO]: " MSMTP_USER || MSMTP_USER=""
+            MSMTP_USER="${MSMTP_USER:-$INPUT_EMAIL_TO}"
+
+            echo "Note: For Gmail, Outlook, or iCloud, use an App Password, not your main account password."
+            read -r -s -p "SMTP Password / App Password: " MSMTP_PASS || MSMTP_PASS=""
+            echo
+
+            if [ -n "$MSMTP_PASS" ]; then
+              cat > "$HOME/.msmtprc" <<EOF
+defaults
+auth           on
+tls            on
+logfile        ~/.msmtp.log
+
+account        default
+host           $MSMTP_HOST
+port           $MSMTP_PORT
+tls_starttls   on
+from           $MSMTP_USER
+user           $MSMTP_USER
+password       "$MSMTP_PASS"
+EOF
+              chmod 600 "$HOME/.msmtprc"
+              success "~/.msmtprc configured and permissions set to 600!"
+              sed -i.bak -e "s|^EMAIL_FROM=.*|EMAIL_FROM=\"$MSMTP_USER\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+
+              read -r -p "Send a test email to $INPUT_EMAIL_TO now? [Y/n]: " TEST_EMAIL || TEST_EMAIL="y"
+              if [[ ! "$TEST_EMAIL" =~ ^[Nn]$ ]]; then
+                info "Sending test email..."
+                if EMAIL_TO="$INPUT_EMAIL_TO" EMAIL_FROM="$MSMTP_USER" EMAIL_SUBJECT="[GitHub Mirror] Test notification" "$SCRIPT_DIR/notify.sh" <<< "This is a test notification from GitHub -> GitLab Mirror setup." >/dev/null 2>&1; then
+                  success "Test email sent successfully! Check your inbox."
+                else
+                  warn "Failed to send test email. Check ~/.msmtprc and ~/.msmtp.log for details."
+                fi
+              fi
+            else
+              warn "Password was left empty. ~/.msmtprc was not created (see README.md)."
+            fi
+          else
+            info "Remember to create your ~/.msmtprc manually (see README.md)."
+          fi
+        else
+          success "Found existing ~/.msmtprc"
         fi
       fi
     fi
