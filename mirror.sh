@@ -47,6 +47,8 @@ declare -a REPAIRED=()
 declare -a SKIPPED=()
 declare -a FAILED=()
 declare -a FILTERED=()
+declare -a ARCHIVED_SKIPPED=()
+declare -a COLLECTED_REPOS=()
 KEPT=""
 LOG_FILE=""
 
@@ -237,8 +239,14 @@ build_report() {
     echo "Updated                : ${#UPDATED[@]}"
     echo "Repaired               : ${#REPAIRED[@]}"
     echo "Unchanged              : ${#SKIPPED[@]}"
+    echo "Skipped (archived)     : ${#ARCHIVED_SKIPPED[@]}"
     echo "Failed                 : ${#FAILED[@]}"
     echo "Excluded by filter     : ${#FILTERED[@]}"
+    if [ "${#ARCHIVED_SKIPPED[@]}" -gt 0 ]; then
+      echo
+      echo "Archived repositories skipped:"
+      printf '  - %s\n' "${ARCHIVED_SKIPPED[@]}"
+    fi
     if [ "${#FAILED[@]}" -gt 0 ]; then
       echo
       echo "Repositories with errors:"
@@ -318,7 +326,14 @@ list_user_repos() {
   while :; do
     json="$(gh_get "${GITHUB_API_URL}/user/repos?affiliation=owner&per_page=100&page=${page}&sort=full_name")" || return 1
     n="$(printf '%s' "$json" | jq 'length')"
-    printf '%s' "$json" | jq -r "$filter"
+    if [ "$GITHUB_INCLUDE_ARCHIVED" != "true" ]; then
+      while IFS= read -r arch_slug; do
+        [ -n "$arch_slug" ] && ARCHIVED_SKIPPED+=("$arch_slug")
+      done < <(printf '%s' "$json" | jq -r '.[] | select(.archived == true) | .full_name')
+    fi
+    while IFS= read -r slug; do
+      [ -n "$slug" ] && COLLECTED_REPOS+=("$slug")
+    done < <(printf '%s' "$json" | jq -r "$filter")
     [ "$n" -lt 100 ] && break
     page=$((page + 1))
   done
@@ -329,13 +344,21 @@ list_org_repos() {
   while :; do
     json="$(gh_get "${GITHUB_API_URL}/orgs/${org}/repos?type=all&per_page=100&page=${page}&sort=full_name")" || return 1
     n="$(printf '%s' "$json" | jq 'length')"
-    printf '%s' "$json" | jq -r "$filter"
+    if [ "$GITHUB_INCLUDE_ARCHIVED" != "true" ]; then
+      while IFS= read -r arch_slug; do
+        [ -n "$arch_slug" ] && ARCHIVED_SKIPPED+=("$arch_slug")
+      done < <(printf '%s' "$json" | jq -r '.[] | select(.archived == true) | .full_name')
+    fi
+    while IFS= read -r slug; do
+      [ -n "$slug" ] && COLLECTED_REPOS+=("$slug")
+    done < <(printf '%s' "$json" | jq -r "$filter")
     [ "$n" -lt 100 ] && break
     page=$((page + 1))
   done
 }
 
 collect_repos() {
+  COLLECTED_REPOS=()
   local filter; filter="$(build_filter)"
   list_user_repos "$filter" || return 1
   local org
@@ -358,16 +381,16 @@ is_excluded() {
 }
 
 filter_repos() {
-  local input="$1" slug
+  local slug
   KEPT=""
-  while IFS= read -r slug; do
+  for slug in "${COLLECTED_REPOS[@]}"; do
     [ -n "$slug" ] || continue
     if is_excluded "$slug"; then
       FILTERED+=("$slug")
     else
       KEPT+="$slug"$'\n'
     fi
-  done <<<"$input"
+  done
   KEPT="${KEPT%$'\n'}"
 }
 
@@ -461,7 +484,7 @@ mirror_repo() {
     is_archived="$(gh_get "${GITHUB_API_URL}/repos/$slug" 2>/dev/null | jq -r '.archived // false' || true)"
     if [ "$is_archived" = "true" ]; then
       log "  · $slug — skipped (archived on GitHub)"
-      SKIPPED+=("$slug")
+      ARCHIVED_SKIPPED+=("$slug")
       return 0
     fi
   fi
@@ -550,10 +573,10 @@ main() {
   if [ "$MODE" = "one" ]; then
     repos="$ONLY_REPO"
   else
-    if ! repos="$(collect_repos)"; then
+    if ! collect_repos; then
       die "Could not fetch repository list from GitHub (check token and permissions)"
     fi
-    filter_repos "$repos"
+    filter_repos
     repos="$KEPT"
   fi
 
@@ -579,7 +602,7 @@ main() {
     mirror_repo "$repo" || true
   done <<<"$repos"
 
-  log "===== ${tag}Summary: $TOTAL repos | ${#UPDATED[@]} updated | ${#REPAIRED[@]} repaired | ${#SKIPPED[@]} unchanged | ${#FAILED[@]} failed | ${#FILTERED[@]} excluded | $((SECONDS - START_TS))s ====="
+  log "===== ${tag}Summary: $TOTAL repos | ${#UPDATED[@]} updated | ${#REPAIRED[@]} repaired | ${#SKIPPED[@]} unchanged | ${#ARCHIVED_SKIPPED[@]} archived | ${#FAILED[@]} failed | ${#FILTERED[@]} excluded | $((SECONDS - START_TS))s ====="
   return 0
 }
 
