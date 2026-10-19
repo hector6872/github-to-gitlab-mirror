@@ -157,21 +157,63 @@ GITLAB_HOST="${GITLAB_HOST%/}"
 GITHUB_API_URL="${GITHUB_API_URL%/}"
 GITLAB_HOSTNAME="${GITLAB_HOST#*://}"
 GITLAB_HOSTNAME="${GITLAB_HOSTNAME%%/*}"
-GITLAB_NAMESPACE="${GITLAB_GROUP:-$GITLAB_USER}"
-GITLAB_NAMESPACE="${GITLAB_NAMESPACE#/}"
-GITLAB_NAMESPACE="${GITLAB_NAMESPACE%/}"
 
 # CLI dry-run override
 [ "$CLI_DRY_RUN" = "true" ] && DRY_RUN="true"
 
-# Validate required variables & dependencies
-[ -n "$GITHUB_USER" ]  || die "GITHUB_USER is required (set in .env or environment)"
-[ -n "$GITHUB_TOKEN" ] || die "GITHUB_TOKEN is required (set in .env or environment)"
-[ -n "$GITLAB_USER" ]  || die "GITLAB_USER is required (set in .env or environment)"
-[ -n "$GITLAB_TOKEN" ] || die "GITLAB_TOKEN is required (set in .env or environment)"
+# Validate tools & tokens
 command -v git >/dev/null 2>&1 || die "git is not installed (please install git)"
 command -v curl >/dev/null 2>&1 || die "curl is not installed (please install curl)"
 command -v jq >/dev/null 2>&1 || die "jq is not installed (please install jq)"
+
+[ -n "$GITHUB_TOKEN" ] || die "GITHUB_TOKEN is required (set in .env or environment)"
+[ -n "$GITLAB_TOKEN" ] || die "GITLAB_TOKEN is required (set in .env or environment)"
+
+# ---------------------------------------------------------------------------
+# API Helpers
+# ---------------------------------------------------------------------------
+gh_get() {
+  curl -fsS \
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "$1"
+}
+
+urlencode() { jq -rn --arg s "$1" '$s | @uri'; }
+
+gitlab_api() {
+  local method="$1" path="$2" data="${3:-}"
+  if [ -n "$data" ]; then
+    curl -fsS -X "$method" \
+      -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "$data" "${GITLAB_HOST}/api/v4${path}"
+  else
+    curl -fsS -X "$method" \
+      -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+      "${GITLAB_HOST}/api/v4${path}"
+  fi
+}
+
+# Auto-detect GitHub user if not set
+if [ -z "$GITHUB_USER" ]; then
+  GITHUB_USER="$(gh_get "${GITHUB_API_URL}/user" 2>/dev/null | jq -r '.login // empty')"
+  [ -n "$GITHUB_USER" ] || die "GITHUB_USER could not be autodetected (verify GITHUB_TOKEN or set GITHUB_USER)"
+fi
+
+# Auto-detect GitLab user if not set
+if [ -z "$GITLAB_USER" ]; then
+  GITLAB_USER="$(gitlab_api GET "/user" 2>/dev/null | jq -r '.username // empty')"
+  if [ -z "$GITLAB_USER" ] && [ -z "$GITLAB_GROUP" ]; then
+    die "GITLAB_USER could not be autodetected (verify GITLAB_TOKEN or set GITLAB_USER / GITLAB_GROUP)"
+  fi
+fi
+
+GITLAB_NAMESPACE="${GITLAB_GROUP:-$GITLAB_USER}"
+GITLAB_NAMESPACE="${GITLAB_NAMESPACE#/}"
+GITLAB_NAMESPACE="${GITLAB_NAMESPACE%/}"
+[ -n "$GITLAB_NAMESPACE" ] || die "GitLab target namespace could not be determined (set GITLAB_USER or GITLAB_GROUP)"
 
 # ---------------------------------------------------------------------------
 # Directories and log file
@@ -285,16 +327,8 @@ finish() {
 trap finish EXIT
 
 # ---------------------------------------------------------------------------
-# GitHub API
+# GitHub Repository Discovery
 # ---------------------------------------------------------------------------
-gh_get() {
-  curl -fsS \
-    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "$1"
-}
-
 list_user_repos() {
   local filter="$1" page=1 json n
   while :; do
@@ -354,24 +388,8 @@ filter_repos() {
 }
 
 # ---------------------------------------------------------------------------
-# GitLab API
+# GitLab Helpers
 # ---------------------------------------------------------------------------
-urlencode() { jq -rn --arg s "$1" '$s | @uri'; }
-
-gitlab_api() {
-  local method="$1" path="$2" data="${3:-}"
-  if [ -n "$data" ]; then
-    curl -fsS -X "$method" \
-      -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d "$data" "${GITLAB_HOST}/api/v4${path}"
-  else
-    curl -fsS -X "$method" \
-      -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      "${GITLAB_HOST}/api/v4${path}"
-  fi
-}
-
 gitlab_group_id() {
   gitlab_api GET "/groups/$(urlencode "$GITLAB_GROUP")" 2>/dev/null | jq -r '.id'
 }
