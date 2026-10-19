@@ -153,21 +153,21 @@ echo
 info "Configuring environment (.env)..."
 ENV_FILE="$SCRIPT_DIR/.env"
 
-RECONFIGURE=false
+RECONFIGURE_CREDS=false
 if [ ! -f "$ENV_FILE" ]; then
   cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   success "Created .env from .env.example (permissions: 600)"
-  RECONFIGURE=true
+  RECONFIGURE_CREDS=true
 else
   warn ".env file already exists."
   if [ "$INTERACTIVE" = true ]; then
-    read -r -p "Do you want to reconfigure credentials? [y/N]: " REPLY || REPLY="n"
-    [[ "$REPLY" =~ ^[Yy]$ ]] && RECONFIGURE=true
+    read -r -p "Do you want to update GitHub/GitLab credentials? [y/N]: " REPLY || REPLY="n"
+    [[ "$REPLY" =~ ^[Yy]$ ]] && RECONFIGURE_CREDS=true
   fi
 fi
 
-if [ "$INTERACTIVE" = true ] && [ "$RECONFIGURE" = true ]; then
+if [ "$INTERACTIVE" = true ] && [ "$RECONFIGURE_CREDS" = true ]; then
   echo
   printf "Enter your credentials (press Enter to skip/keep unchanged):\n\n"
 
@@ -194,37 +194,66 @@ if [ "$INTERACTIVE" = true ] && [ "$RECONFIGURE" = true ]; then
   if [ -n "$INPUT_GL_GROUP" ]; then
     sed -i.bak -e "s|^GITLAB_GROUP=.*|GITLAB_GROUP=\"$INPUT_GL_GROUP\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
   fi
+fi
 
-  # Optional Email configuration if msmtp is present
-  if [ "$HAS_MSMTP" = true ] || command -v msmtp >/dev/null 2>&1; then
+# Optional Email configuration
+if [ "$INTERACTIVE" = true ]; then
+  CURRENT_EMAIL_NOTIFY="$(grep -E '^EMAIL_NOTIFY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"'\'' ' || true)"
+  CURRENT_EMAIL_TO="$(grep -E '^EMAIL_TO=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"'\'' ' || true)"
+
+  CONFIGURE_EMAIL=false
+  if [ "$CURRENT_EMAIL_NOTIFY" = "true" ] && [ -n "$CURRENT_EMAIL_TO" ]; then
     echo
-    read -r -p "Configure email failure notifications? [y/N]: " CONFIGURE_EMAIL || CONFIGURE_EMAIL="n"
-    if [[ "$CONFIGURE_EMAIL" =~ ^[Yy]$ ]]; then
-      read -r -p "Recipient email address (EMAIL_TO): " INPUT_EMAIL_TO || INPUT_EMAIL_TO=""
-      if [ -n "$INPUT_EMAIL_TO" ]; then
-        sed -i.bak -e "s|^EMAIL_NOTIFY=.*|EMAIL_NOTIFY=\"true\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
-        sed -i.bak -e "s|^EMAIL_TO=.*|EMAIL_TO=\"$INPUT_EMAIL_TO\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
-        success "Email notifications enabled for: $INPUT_EMAIL_TO"
-        if [ ! -f "$HOME/.msmtprc" ]; then
+    read -r -p "Email notifications are active for '$CURRENT_EMAIL_TO'. Reconfigure email? [y/N]: " RECONF_EMAIL || RECONF_EMAIL="n"
+    [[ "$RECONF_EMAIL" =~ ^[Yy]$ ]] && CONFIGURE_EMAIL=true
+  else
+    echo
+    read -r -p "Configure email failure notifications? [y/N]: " RECONF_EMAIL || RECONF_EMAIL="n"
+    [[ "$RECONF_EMAIL" =~ ^[Yy]$ ]] && CONFIGURE_EMAIL=true
+  fi
+
+  if [ "$CONFIGURE_EMAIL" = true ]; then
+    read -r -p "Recipient email address (EMAIL_TO)${CURRENT_EMAIL_TO:+ [current: $CURRENT_EMAIL_TO]}: " INPUT_EMAIL_TO || INPUT_EMAIL_TO=""
+    INPUT_EMAIL_TO="${INPUT_EMAIL_TO:-$CURRENT_EMAIL_TO}"
+    if [ -n "$INPUT_EMAIL_TO" ]; then
+      sed -i.bak -e "s|^EMAIL_NOTIFY=.*|EMAIL_NOTIFY=\"true\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+      sed -i.bak -e "s|^EMAIL_TO=.*|EMAIL_TO=\"$INPUT_EMAIL_TO\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+      success "Email notifications enabled for: $INPUT_EMAIL_TO"
+
+      # Check existing config (local project .msmtprc or global)
+      CURRENT_MSMTP_CFG="$(grep -E '^MSMTP_CONFIG=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"'\'' ' || true)"
+      EXISTING_RC=""
+      if [ -n "$CURRENT_MSMTP_CFG" ] && [ -f "$CURRENT_MSMTP_CFG" ]; then
+        EXISTING_RC="$CURRENT_MSMTP_CFG"
+      elif [ -f "$SCRIPT_DIR/.msmtprc" ]; then
+        EXISTING_RC="$SCRIPT_DIR/.msmtprc"
+      elif [ -f "$HOME/.msmtprc" ]; then
+        EXISTING_RC="$HOME/.msmtprc"
+      elif [ -f "$HOME/.config/msmtp/config" ]; then
+        EXISTING_RC="$HOME/.config/msmtp/config"
+      fi
+
+      if [ -z "$EXISTING_RC" ]; then
+        echo
+        read -r -p "Configure msmtp credentials in this project folder ($SCRIPT_DIR/.msmtprc)? [Y/n]: " CONFIGURE_MSMTPRC || CONFIGURE_MSMTPRC="y"
+        if [[ ! "$CONFIGURE_MSMTPRC" =~ ^[Nn]$ ]]; then
+          default_host="smtp.gmail.com"
+          read -r -p "SMTP Host [default: $default_host]: " MSMTP_HOST || MSMTP_HOST=""
+          MSMTP_HOST="${MSMTP_HOST:-$default_host}"
+
+          read -r -p "SMTP Port [default: 587]: " MSMTP_PORT || MSMTP_PORT=""
+          MSMTP_PORT="${MSMTP_PORT:-587}"
+
+          read -r -p "SMTP Username / Sender email [default: $INPUT_EMAIL_TO]: " MSMTP_USER || MSMTP_USER=""
+          MSMTP_USER="${MSMTP_USER:-$INPUT_EMAIL_TO}"
+
+          echo "Note: For Gmail, Outlook, or iCloud, use an App Password, not your main account password."
+          read -r -s -p "SMTP Password / App Password: " MSMTP_PASS || MSMTP_PASS=""
           echo
-          read -r -p "~/.msmtprc not found. Would you like to configure it now? [Y/n]: " CONFIGURE_MSMTPRC || CONFIGURE_MSMTPRC="y"
-          if [[ ! "$CONFIGURE_MSMTPRC" =~ ^[Nn]$ ]]; then
-            default_host="smtp.gmail.com"
-            read -r -p "SMTP Host [default: $default_host]: " MSMTP_HOST || MSMTP_HOST=""
-            MSMTP_HOST="${MSMTP_HOST:-$default_host}"
 
-            read -r -p "SMTP Port [default: 587]: " MSMTP_PORT || MSMTP_PORT=""
-            MSMTP_PORT="${MSMTP_PORT:-587}"
-
-            read -r -p "SMTP Username / Sender email [default: $INPUT_EMAIL_TO]: " MSMTP_USER || MSMTP_USER=""
-            MSMTP_USER="${MSMTP_USER:-$INPUT_EMAIL_TO}"
-
-            echo "Note: For Gmail, Outlook, or iCloud, use an App Password, not your main account password."
-            read -r -s -p "SMTP Password / App Password: " MSMTP_PASS || MSMTP_PASS=""
-            echo
-
-            if [ -n "$MSMTP_PASS" ]; then
-              cat > "$HOME/.msmtprc" <<EOF
+          if [ -n "$MSMTP_PASS" ]; then
+            TARGET_RC="$SCRIPT_DIR/.msmtprc"
+            cat > "$TARGET_RC" <<EOF
 defaults
 auth           on
 tls            on
@@ -238,27 +267,81 @@ from           $MSMTP_USER
 user           $MSMTP_USER
 password       "$MSMTP_PASS"
 EOF
-              chmod 600 "$HOME/.msmtprc"
-              success "~/.msmtprc configured and permissions set to 600!"
-              sed -i.bak -e "s|^EMAIL_FROM=.*|EMAIL_FROM=\"$MSMTP_USER\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+            chmod 600 "$TARGET_RC"
+            sed -i.bak -e "s|^#* *MSMTP_CONFIG=.*|MSMTP_CONFIG=\"$TARGET_RC\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+            sed -i.bak -e "s|^EMAIL_FROM=.*|EMAIL_FROM=\"$MSMTP_USER\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+            success "Created $TARGET_RC (permissions: 600) and set MSMTP_CONFIG in .env"
 
-              read -r -p "Send a test email to $INPUT_EMAIL_TO now? [Y/n]: " TEST_EMAIL || TEST_EMAIL="y"
-              if [[ ! "$TEST_EMAIL" =~ ^[Nn]$ ]]; then
-                info "Sending test email..."
-                if EMAIL_TO="$INPUT_EMAIL_TO" EMAIL_FROM="$MSMTP_USER" EMAIL_SUBJECT="[GitHub Mirror] Test notification" "$SCRIPT_DIR/notify.sh" <<< "This is a test notification from GitHub -> GitLab Mirror setup." >/dev/null 2>&1; then
-                  success "Test email sent successfully! Check your inbox."
-                else
-                  warn "Failed to send test email. Check ~/.msmtprc and ~/.msmtp.log for details."
-                fi
+            read -r -p "Send a test email to $INPUT_EMAIL_TO now? [Y/n]: " TEST_EMAIL || TEST_EMAIL="y"
+            if [[ ! "$TEST_EMAIL" =~ ^[Nn]$ ]]; then
+              info "Sending test email..."
+              if EMAIL_TO="$INPUT_EMAIL_TO" EMAIL_FROM="$MSMTP_USER" MSMTP_CONFIG="$TARGET_RC" EMAIL_SUBJECT="[GitHub Mirror] Test notification" "$SCRIPT_DIR/notify.sh" <<< "This is a test notification from GitHub -> GitLab Mirror setup." >/dev/null 2>&1; then
+                success "Test email sent successfully! Check your inbox."
+              else
+                warn "Failed to send test email. Check $TARGET_RC and ~/.msmtp.log for details."
               fi
-            else
-              warn "Password was left empty. ~/.msmtprc was not created (see README.md)."
             fi
           else
-            info "Remember to create your ~/.msmtprc manually (see README.md)."
+            warn "Password was left empty. $SCRIPT_DIR/.msmtprc was not created."
           fi
-        else
-          success "Found existing ~/.msmtprc"
+        fi
+      else
+        success "Found existing msmtp configuration: $EXISTING_RC"
+        if [ "$EXISTING_RC" = "$SCRIPT_DIR/.msmtprc" ]; then
+          sed -i.bak -e "s|^#* *MSMTP_CONFIG=.*|MSMTP_CONFIG=\"$EXISTING_RC\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+        fi
+        read -r -p "Send a test email to $INPUT_EMAIL_TO now? [y/N]: " TEST_EMAIL || TEST_EMAIL="n"
+        if [[ "$TEST_EMAIL" =~ ^[Yy]$ ]]; then
+          info "Sending test email..."
+          if EMAIL_TO="$INPUT_EMAIL_TO" MSMTP_CONFIG="$EXISTING_RC" EMAIL_SUBJECT="[GitHub Mirror] Test notification" "$SCRIPT_DIR/notify.sh" <<< "This is a test notification from GitHub -> GitLab Mirror setup." >/dev/null 2>&1; then
+            success "Test email sent successfully! Check your inbox."
+          else
+            warn "Failed to send test email. Check $EXISTING_RC and ~/.msmtp.log for details."
+          fi
+        fi
+      fi
+    fi
+  elif [ "$CURRENT_EMAIL_NOTIFY" = "true" ]; then
+    CURRENT_MSMTP_CFG="$(grep -E '^MSMTP_CONFIG=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"'\'' ' || true)"
+    if [ -z "$CURRENT_MSMTP_CFG" ] && [ ! -f "$SCRIPT_DIR/.msmtprc" ] && [ ! -f "$HOME/.msmtprc" ] && [ ! -f "$HOME/.config/msmtp/config" ]; then
+      echo
+      warn "Email notifications are enabled in .env, but no msmtp configuration was found."
+      read -r -p "Configure msmtp in $SCRIPT_DIR/.msmtprc now? [Y/n]: " CONFIGURE_MSMTPRC || CONFIGURE_MSMTPRC="y"
+      if [[ ! "$CONFIGURE_MSMTPRC" =~ ^[Nn]$ ]]; then
+        default_host="smtp.gmail.com"
+        read -r -p "SMTP Host [default: $default_host]: " MSMTP_HOST || MSMTP_HOST=""
+        MSMTP_HOST="${MSMTP_HOST:-$default_host}"
+
+        read -r -p "SMTP Port [default: 587]: " MSMTP_PORT || MSMTP_PORT=""
+        MSMTP_PORT="${MSMTP_PORT:-587}"
+
+        read -r -p "SMTP Username / Sender email [default: ${CURRENT_EMAIL_TO:-}]: " MSMTP_USER || MSMTP_USER=""
+        MSMTP_USER="${MSMTP_USER:-${CURRENT_EMAIL_TO:-}}"
+
+        echo "Note: For Gmail, Outlook, or iCloud, use an App Password, not your main account password."
+        read -r -s -p "SMTP Password / App Password: " MSMTP_PASS || MSMTP_PASS=""
+        echo
+
+        if [ -n "$MSMTP_PASS" ]; then
+          TARGET_RC="$SCRIPT_DIR/.msmtprc"
+          cat > "$TARGET_RC" <<EOF
+defaults
+auth           on
+tls            on
+logfile        ~/.msmtp.log
+
+account        default
+host           $MSMTP_HOST
+port           $MSMTP_PORT
+tls_starttls   on
+from           $MSMTP_USER
+user           $MSMTP_USER
+password       "$MSMTP_PASS"
+EOF
+          chmod 600 "$TARGET_RC"
+          sed -i.bak -e "s|^#* *MSMTP_CONFIG=.*|MSMTP_CONFIG=\"$TARGET_RC\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+          [ -n "$MSMTP_USER" ] && sed -i.bak -e "s|^EMAIL_FROM=.*|EMAIL_FROM=\"$MSMTP_USER\"|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+          success "Created $TARGET_RC and set MSMTP_CONFIG in .env!"
         fi
       fi
     fi

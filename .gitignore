@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 *.conf
+.msmtprc
+*.msmtprc
+!.msmtprc.example
 !config/*.example
 
 # Data and logs
