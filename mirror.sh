@@ -602,6 +602,20 @@ main() {
     mirror_repo "$repo" || true
   done <<<"$repos"
 
+  if [ "${#ARCHIVED_SKIPPED[@]}" -gt 0 ]; then
+    log "Archived repositories skipped (${#ARCHIVED_SKIPPED[@]}):"
+    for repo in "${ARCHIVED_SKIPPED[@]}"; do
+      log "  · $repo"
+    done
+  fi
+
+  if [ "${#FAILED[@]}" -gt 0 ]; then
+    log "Repositories with errors (${#FAILED[@]}):"
+    for repo in "${FAILED[@]}"; do
+      log "  ✗ $repo"
+    done
+  fi
+
   log "===== ${tag}Summary: $TOTAL repos | ${#UPDATED[@]} updated | ${#REPAIRED[@]} repaired | ${#SKIPPED[@]} unchanged | ${#ARCHIVED_SKIPPED[@]} archived | ${#FAILED[@]} failed | ${#FILTERED[@]} excluded | $((SECONDS - START_TS))s ====="
   return 0
 }
