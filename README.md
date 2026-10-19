@@ -63,13 +63,22 @@ Navigate to: **GitLab → Preferences / User Settings → Access Tokens**.
 
 ## Quick Start
 
-### 1. Clone & Configure
+### 1. Clone & Setup
 
 ```bash
 git clone <this-repo> github-gitlab-mirror
 cd github-gitlab-mirror
 
-# Create your .env file
+# Run the interactive setup wizard
+./setup.sh
+```
+
+The setup script checks dependencies, sets up `.env` with strict permissions (`600`), validates your tokens against the GitHub and GitLab APIs, and can configure daily automation (systemd user timer or cron).
+
+<details>
+<summary>Manual configuration</summary>
+
+```bash
 cp .env.example .env
 chmod 600 .env
 ```
@@ -80,6 +89,8 @@ Edit `.env` and fill in your credentials (usernames are auto-detected from token
 GITHUB_TOKEN="ghp_your_github_token"
 GITLAB_TOKEN="glpat_your_gitlab_token"
 ```
+
+</details>
 
 ### 2. Test Run
 
