@@ -212,7 +212,7 @@ echo
 info "Scheduling configuration..."
 
 HAS_SYSTEMD=false
-if command -v systemctl >/dev/null 2>&1 && systemctl --user list-units >/dev/null 2>&1; then
+if command -v systemctl >/dev/null 2>&1; then
   HAS_SYSTEMD=true
 fi
 
@@ -238,12 +238,26 @@ if [ "$INTERACTIVE" = true ]; then
 
         cp "$SCRIPT_DIR/systemd/github-mirror.timer" "$USER_SYSTEMD_DIR/github-mirror.timer"
 
-        systemctl --user daemon-reload
-        systemctl --user enable --now github-mirror.timer
-        success "systemd user timer enabled and active!"
-        info "Check status anytime with: systemctl --user list-timers github-mirror.timer"
+        if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+        fi
+
+        if systemctl --user daemon-reload 2>/dev/null && systemctl --user enable --now github-mirror.timer 2>/dev/null; then
+          success "systemd user timer enabled and active!"
+          info "Check status anytime with: systemctl --user list-timers github-mirror.timer"
+          if command -v loginctl >/dev/null 2>&1; then
+            loginctl enable-linger "$USER" 2>/dev/null || true
+          fi
+        else
+          warn "Unit files installed to $USER_SYSTEMD_DIR, but 'systemctl --user' could not reach D-Bus."
+          echo "  Run these commands to activate manually:"
+          echo "    export XDG_RUNTIME_DIR=/run/user/\$(id -u)"
+          echo "    systemctl --user daemon-reload"
+          echo "    systemctl --user enable --now github-mirror.timer"
+          echo "    loginctl enable-linger \$USER"
+        fi
       else
-        warn "systemd user session is not available on this system."
+        warn "systemctl is not available on this system."
         read -r -p "Fall back to cron? [Y/n]: " CRON_FALLBACK || CRON_FALLBACK="y"
         if [[ ! "$CRON_FALLBACK" =~ ^[Nn]$ ]]; then
           SCHED_CHOICE="2"
