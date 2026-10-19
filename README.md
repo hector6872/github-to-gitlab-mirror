@@ -160,22 +160,18 @@ ENV_FILE=/path/to/custom.env ./mirror.sh
 
 ## Scheduling
 
-### Option A: systemd User Timer (Linux, no root needed)
+### Option A: systemd System Timer (Linux)
 
-To run daily as your standard user:
+To run daily at 03:00 via systemd:
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp systemd/github-mirror.service ~/.config/systemd/user/
-cp systemd/github-mirror.timer ~/.config/systemd/user/
+sudo cp systemd/github-mirror.timer /etc/systemd/system/
+sudo sed -e "s|%h/gitlab-mirror-gist|$PWD|g" \
+         -e "s|%u|$USER|g" \
+         systemd/github-mirror.service | sudo tee /etc/systemd/system/github-mirror.service >/dev/null
 
-# Adjust paths in ~/.config/systemd/user/github-mirror.service if needed:
-# WorkingDirectory=%h/github-gitlab-mirror
-# ExecStart=%h/github-gitlab-mirror/mirror.sh
-# EnvironmentFile=-%h/github-gitlab-mirror/.env
-
-systemctl --user daemon-reload
-systemctl --user enable --now github-mirror.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now github-mirror.timer
 ```
 
 #### Monitoring & Checking Last Execution
@@ -184,16 +180,16 @@ Check when the script last ran and view outputs:
 
 ```bash
 # View last execution time and next scheduled run
-systemctl --user list-timers github-mirror.timer
+systemctl list-timers github-mirror.timer
 
 # View service status and completion timestamp
-systemctl --user status github-mirror.service
+systemctl status github-mirror.service
 
 # View last 50 log lines of execution output
-journalctl --user -u github-mirror.service -n 50 --no-pager
+journalctl -u github-mirror.service -n 50 --no-pager
 
 # Stream logs in real-time
-journalctl --user -u github-mirror.service -f
+journalctl -u github-mirror.service -f
 ```
 
 *(If `LOG_DIR="./logs"` is set in `.env`, you can also view `logs/latest.log`)*
